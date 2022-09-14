@@ -18,7 +18,7 @@ type moc struct {
 	sendDelay    int
 }
 
-func (m *moc) Persist(msgs []msg.Message) error {
+func (m *moc) Consume(msgs []msg.Message) error {
 	if m.persistDelay > 0 {
 		time.Sleep(time.Duration(m.persistDelay) * time.Millisecond)
 	}
@@ -32,6 +32,10 @@ func (m *moc) Persist(msgs []msg.Message) error {
 	return nil
 }
 
+func (m *moc) ConsumeSingle(ms msg.Message) error {
+	return m.Consume([]msg.Message{ms})
+}
+
 func sendLoop(t *testing.T, m *moc, c *CollectorImp, loop int, sig chan struct{}) {
 	for i := 0; i < loop; i++ {
 		rand.Seed(time.Now().UnixNano())
@@ -41,6 +45,7 @@ func sendLoop(t *testing.T, m *moc, c *CollectorImp, loop int, sig chan struct{}
 		}
 		item := msg.Message{
 			CollectTime: time.Now(),
+			Label:       "test",
 			Creator:     strconv.FormatInt(int64(i), 10),
 			Content:     strconv.FormatInt(num, 10),
 		}

@@ -7,6 +7,12 @@ import (
 	"github.com/hhh811/log-compass/msg"
 )
 
+type Collector interface {
+	Start()
+	Stop()
+	Collect(msg.Message)
+}
+
 type CollectorImp struct {
 	conf CollectorConf
 
@@ -18,22 +24,24 @@ type CollectorImp struct {
 
 	stopSig chan struct{} // sig to stop
 
-	loopEndSig chan struct{}
+	collectLoopEnd chan struct{}
+	consumeLoopEnd chan struct{}
 
 	ticker time.Ticker
 
-	persistor Persistor
+	consumer Consumer
 }
 
-func NewCollector(conf CollectorConf, persistor Persistor) *CollectorImp {
+func NewCollector(conf CollectorConf, collector Consumer) *CollectorImp {
 	return &CollectorImp{
-		conf:         conf,
-		logCh:        make(chan msg.Message),
-		persistQueue: make(chan []msg.Message, 1),
-		stopSig:      make(chan struct{}),
-		loopEndSig:   make(chan struct{}),
-		ticker:       *time.NewTicker(time.Millisecond * time.Duration(conf.triggerMilliSeconds)),
-		persistor:    persistor,
+		conf:           conf,
+		logCh:          make(chan msg.Message),
+		persistQueue:   make(chan []msg.Message, 1),
+		stopSig:        make(chan struct{}),
+		collectLoopEnd: make(chan struct{}),
+		consumeLoopEnd: make(chan struct{}),
+		ticker:         *time.NewTicker(time.Millisecond * time.Duration(conf.triggerMilliSeconds)),
+		consumer:       collector,
 	}
 }
 
@@ -43,7 +51,7 @@ func (c *CollectorImp) Collect(msg msg.Message) {
 
 func (c *CollectorImp) Start() {
 	go c.collectLoop()
-	go c.persistLoop()
+	go c.consumeLoop()
 	log.Infof("start!")
 }
 
@@ -68,7 +76,7 @@ func (c *CollectorImp) collectLoop() {
 			log.Debugf("ticker trigger persist")
 			c.tryPersist()
 		case <-c.stopSig:
-			close(c.loopEndSig)
+			close(c.collectLoopEnd)
 			return
 		}
 	}
@@ -77,22 +85,23 @@ func (c *CollectorImp) collectLoop() {
 // this function must not block
 func (c *CollectorImp) tryPersist() {
 	select {
-	case c.persistQueue <- c.cache[:]:
+	case c.persistQueue <- c.cache[:len(c.cache)]:
 		c.cache = []msg.Message{}
 	default:
 	}
 }
 
-func (c *CollectorImp) persistLoop() {
+func (c *CollectorImp) consumeLoop() {
 	for {
 		select {
 		case <-c.stopSig:
+			close(c.consumeLoopEnd)
 			return
 		case logs := <-c.persistQueue:
 			if len(logs) == 0 {
 				continue
 			}
-			if e := c.persistor.Persist(logs); e != nil {
+			if e := c.consumer.Consume(logs); e != nil {
 				// todo how to deal with persist error
 				log.Errorf("persist error %q", e)
 			}
@@ -102,15 +111,20 @@ func (c *CollectorImp) persistLoop() {
 }
 
 func (c *CollectorImp) finish() {
+	log.Debugf("finish\n")
+	<-c.collectLoopEnd
+	<-c.consumeLoopEnd
 	select {
 	case logs := <-c.persistQueue:
-		if e := c.persistor.Persist(logs); e != nil {
+		if len(logs) == 0 {
+			break
+		}
+		if e := c.consumer.Consume(logs); e != nil {
 			// todo how to deal with persist error
 			log.Errorf("persist error %q", e)
 		}
 		log.Debugf("persist %d logs %s to %s success", len(logs), logs[0].Creator, logs[len(logs)-1].Creator)
 	default:
 	}
-	<-c.loopEndSig
-	c.persistor.Persist(c.cache)
+	c.consumer.Consume(c.cache)
 }
